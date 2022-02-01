@@ -14,7 +14,8 @@ import (
 )
 
 type segmentReader struct {
-	filename   string
+	dir        string // directory containing segment
+	filename   string // filename of segment
 	firstIndex Index
 	lastIndex  Index
 	f          *os.File
@@ -58,7 +59,8 @@ func openSegment(dir, filename string) (*segmentReader, error) {
 		return nil, errors.New(fmt.Sprintf("Segment %v expected to having starting index %d but was %d", filename, firstIndex, idx))
 	}
 	rdr := &segmentReader{
-		filename:   path.Join(dir, filename),
+		dir:        dir,
+		filename:   filename,
 		firstIndex: firstIndex,
 		lastIndex:  lastIndex,
 		f:          f,
@@ -83,7 +85,8 @@ func newSegment(dir string, config *Config, firstIndex Index) (*segmentReaderWri
 	return &segmentReaderWriter{
 		config: *config,
 		reader: segmentReader{
-			filename:   path.Join(dir, fn),
+			dir:        dir,
+			filename:   fn,
 			firstIndex: firstIndex,
 			lastIndex:  0,
 			f:          f,
@@ -104,6 +107,9 @@ func (s *segmentReader) read(idx Index) ([]byte, error) {
 		if err := s.index(); err != nil {
 			return nil, err
 		}
+	}
+	if idx < s.firstIndex || idx > s.lastIndex {
+		return nil, fmt.Errorf("Segment %v doesn't contain index %d", s, idx)
 	}
 	offset := s.offsets[idx-s.firstIndex]
 	if _, err := s.f.Seek(offset, io.SeekStart); err != nil {
@@ -152,19 +158,53 @@ func (s *segmentReader) index() error {
 	}
 }
 
+func (s *segmentReader) String() string {
+	return fmt.Sprintf("seg %d-%d in %v\n", s.firstIndex, s.lastIndex, s.filename)
+}
+
 func (s *segmentReaderWriter) full() bool {
 	// returns true if there shouldn't be any more data appended to this segment
 	if s.config.MaxSegmentItems > 0 {
-		if s.nextIndex-s.reader.firstIndex > Index(s.config.MaxSegmentFileSize) {
+		if s.nextIndex-s.reader.firstIndex >= Index(s.config.MaxSegmentItems) {
 			return true
 		}
 	}
 	if s.config.MaxSegmentFileSize > 0 {
-		if s.fileSize > s.config.MaxSegmentFileSize {
+		if s.fileSize >= s.config.MaxSegmentFileSize {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *segmentReader) rewindTo(idx Index) error {
+	if s.offsets == nil {
+		if err := s.index(); err != nil {
+			return err
+		}
+	}
+	offset := s.offsets[idx-s.firstIndex]
+	if _, err := s.f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	if err := os.Truncate(path.Join(s.dir, s.filename), offset); err != nil {
+		return err
+	}
+	s.offsets = s.offsets[:idx-s.firstIndex]
+	s.lastIndex = idx - 1
+	if strings.Index(s.filename, "-") > 0 {
+		oldname := s.filename
+		s.filename = fmt.Sprintf("%020d-%020d", s.firstIndex, s.lastIndex)
+		return os.Rename(path.Join(s.dir, oldname), path.Join(s.dir, s.filename))
+	}
+	return nil
+}
+
+func (s *segmentReader) delete() error {
+	err := s.close()
+	err2 := os.Remove(path.Join(s.dir, s.filename))
+	s.f = nil
+	return any(err2, err)
 }
 
 func (s *segmentReaderWriter) append(d []byte) (Index, error) {
@@ -198,4 +238,35 @@ func (s *segmentReaderWriter) append(d []byte) (Index, error) {
 	s.reader.lastIndex = idx
 	s.fileSize += (4 + int64(len(d)) + 8)
 	return idx, nil
+}
+
+func (s *segmentReaderWriter) rewindTo(idx Index) error {
+	offset := s.reader.offsets[idx-s.reader.firstIndex]
+	if err := s.reader.rewindTo(idx); err != nil {
+		return err
+	}
+	s.fileSize = offset
+	s.nextIndex = idx
+	return nil
+}
+
+func (s *segmentReaderWriter) finish() error {
+	last := fmt.Sprintf("-%020d", s.nextIndex-1)
+	s.reader.f.Close()
+	err := os.Rename(path.Join(s.reader.dir, s.reader.filename), path.Join(s.reader.dir, s.reader.filename+last))
+	if err == nil {
+		s.reader.filename = s.reader.filename + last
+	}
+	var err2 error
+	s.reader.f, err2 = os.Open(path.Join(s.reader.dir, s.reader.filename))
+	return any(err, err2)
+}
+
+func any(errors ...error) error {
+	for _, e := range errors {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
