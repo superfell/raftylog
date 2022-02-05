@@ -32,7 +32,11 @@ type segmentReaderWriter struct {
 func openSegment(dir, filename string) (*segmentReader, error) {
 	// if the segment was cleanly closed, it'll be named firstIndex-lastIndex
 	// if it wasn't it'll be called firstIndex and we'll have to find the last index ourselves
-	parts := strings.SplitN(filename, "-", 2)
+	indexes := filename
+	if strings.HasSuffix(filename, ".seg") {
+		indexes = filename[:len(filename)-4]
+	}
+	parts := strings.SplitN(indexes, "-", 2)
 	fIdx, err := strconv.ParseUint(parts[0], 10, 64)
 	if err != nil {
 		return nil, err
@@ -46,7 +50,7 @@ func openSegment(dir, filename string) (*segmentReader, error) {
 		}
 		lastIndex = Index(lIdx)
 	}
-	f, err := os.Open(path.Join(dir, filename))
+	f, err := os.OpenFile(path.Join(dir, filename), os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +77,7 @@ func openSegment(dir, filename string) (*segmentReader, error) {
 }
 
 func newSegment(dir string, config *Config, firstIndex Index) (*segmentReaderWriter, error) {
-	fn := fmt.Sprintf("%020d", firstIndex)
+	fn := fmt.Sprintf("%020d.seg", firstIndex)
 	f, err := os.Create(path.Join(dir, fn))
 	if err != nil {
 		return nil, err
@@ -147,14 +151,17 @@ func (s *segmentReader) index() error {
 			}
 			return err
 		}
-		len := uint32(0)
-		err = binary.Read(s.f, binary.LittleEndian, &len)
+		vlen := uint32(0)
+		err = binary.Read(s.f, binary.LittleEndian, &vlen)
 		if err == io.EOF {
 			s.offsets = offsets
+			if s.lastIndex != 0 && Index(len(offsets)) != s.lastIndex-s.firstIndex+1 {
+				return fmt.Errorf("segment %s has unexpected number of entries %d expected %d", s.filename, len(offsets), s.lastIndex-s.firstIndex+1)
+			}
 			return nil
 		}
 		offsets = append(offsets, offset)
-		offset += 4 + int64(len) + 8 // len, data, hash
+		offset += 4 + int64(vlen) + 8 // len, data, hash
 	}
 }
 
@@ -194,7 +201,7 @@ func (s *segmentReader) rewindTo(idx Index) error {
 	s.lastIndex = idx - 1
 	if strings.Index(s.filename, "-") > 0 {
 		oldname := s.filename
-		s.filename = fmt.Sprintf("%020d-%020d", s.firstIndex, s.lastIndex)
+		s.filename = fmt.Sprintf("%020d-%020d.seg", s.firstIndex, s.lastIndex)
 		return os.Rename(path.Join(s.dir, oldname), path.Join(s.dir, s.filename))
 	}
 	return nil
@@ -251,11 +258,11 @@ func (s *segmentReaderWriter) rewindTo(idx Index) error {
 }
 
 func (s *segmentReaderWriter) finish() error {
-	last := fmt.Sprintf("-%020d", s.nextIndex-1)
+	last := fmt.Sprintf("%020d-%020d.seg", s.reader.firstIndex, s.nextIndex-1)
 	s.reader.f.Close()
-	err := os.Rename(path.Join(s.reader.dir, s.reader.filename), path.Join(s.reader.dir, s.reader.filename+last))
+	err := os.Rename(path.Join(s.reader.dir, s.reader.filename), path.Join(s.reader.dir, last))
 	if err == nil {
-		s.reader.filename = s.reader.filename + last
+		s.reader.filename = last
 	}
 	var err2 error
 	s.reader.f, err2 = os.Open(path.Join(s.reader.dir, s.reader.filename))

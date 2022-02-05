@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 )
 
 type Index uint64
@@ -37,6 +38,9 @@ func Open(dir string, config *Config, createIfMissing bool) (*Log, error) {
 	for _, f := range files {
 		if f.IsDir() {
 			continue // error?
+		}
+		if !strings.HasSuffix(f.Name(), ".seg") {
+			continue
 		}
 		seg, err := openSegment(dir, f.Name())
 		if err != nil {
@@ -75,8 +79,11 @@ func (log *Log) Append(data []byte) (Index, error) {
 }
 
 func (log *Log) Read(idx Index) ([]byte, error) {
-	if log.items[0].firstIndex > idx {
-		return nil, fmt.Errorf("Index %d not available, earliest available index is %d", idx, log.items[0].firstIndex)
+	if idx < log.FirstIndex() {
+		return nil, fmt.Errorf("Index %d not available, earliest available index is %d", idx, log.FirstIndex())
+	}
+	if idx > log.LastIndex() {
+		return nil, fmt.Errorf("Index %d not available, lastest available index is %d", idx, log.LastIndex())
 	}
 	segIdx := sort.Search(len(log.items), func(i int) bool {
 		return log.items[i].lastIndex >= idx
@@ -93,8 +100,7 @@ func (log *Log) DeleteTo(idx Index) error {
 		return errors.New("Can't delete entire log")
 	}
 	for len(log.items) > 0 && log.items[0].lastIndex < idx {
-		log.items[0].close()
-		err := os.Remove(log.items[0].filename)
+		err := log.items[0].delete()
 		log.items = log.items[1:]
 		if err != nil {
 			return err
@@ -151,9 +157,15 @@ func (log *Log) Close() error {
 }
 
 func (log *Log) FirstIndex() Index {
+	if len(log.items) == 0 {
+		return 0
+	}
 	return log.items[0].firstIndex
 }
 
 func (log *Log) LastIndex() Index {
+	if len(log.items) == 0 {
+		return 0
+	}
 	return log.items[len(log.items)-1].lastIndex
 }

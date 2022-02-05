@@ -2,12 +2,27 @@ package raftylog
 
 import (
 	"bytes"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"testing"
 )
 
 var config = Config{0, 0}
+
+func testDir(t *testing.T) (string, func()) {
+	dir, err := ioutil.TempDir("", t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, func() {
+		if t.Failed() {
+			t.Logf("Test failed, db state left in %v", dir)
+		} else {
+			os.RemoveAll(dir)
+		}
+	}
+}
 
 func Test_Segment(t *testing.T) {
 	dir, err := ioutil.TempDir("", "*")
@@ -46,10 +61,82 @@ func Test_Segment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open existing segment %v", err)
 	}
+	if segr.lastIndex != 4 {
+		t.Errorf("Last Index should be 4 but was %d", segr.lastIndex)
+	}
 	read(t, segr, 3, data3)
 	read(t, segr, 1, data1)
 	read(t, segr, 4, data4)
 	read(t, segr, 2, data2)
+}
+
+func Test_NotFirstSegment(t *testing.T) {
+	dir, err := ioutil.TempDir("", "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		os.RemoveAll(dir)
+	}()
+	seg, err := newSegment(dir, &Config{MaxSegmentItems: 128}, 511)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 150)
+	for i := 511; i <= 613; i++ {
+		seg.append(data)
+	}
+	x, err := seg.reader.read(613)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg.finish()
+	segr, err := openSegment(dir, fmt.Sprintf("%020d-%020d.seg", 511, 613))
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, err = segr.read(613)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, x) {
+		t.Fatal(x)
+	}
+}
+
+func Test_WriteReadWrite(t *testing.T) {
+	dir, cleanup := testDir(t)
+	defer cleanup()
+	seg, err := newSegment(dir, new(Config), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data1 := make([]byte, 100)
+	data2 := make([]byte, 100)
+	for i := byte(0); i < byte(len(data1)); i++ {
+		data1[i] = i
+		data2[i] = 200 - i
+	}
+	idx1, err := seg.append(data1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read1, err := seg.reader.read(idx1)
+	if !bytes.Equal(read1, data1) {
+		t.Fatalf("read1 wrong")
+	}
+	idx2, err := seg.append(data2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read1, err = seg.reader.read(idx1)
+	if !bytes.Equal(read1, data1) {
+		t.Fatalf("read1 wrong")
+	}
+	read2, err := seg.reader.read(idx2)
+	if !bytes.Equal(read2, data2) {
+		t.Fatalf("read2 wrong")
+	}
 }
 
 func Test_SegmentRewind(t *testing.T) {
